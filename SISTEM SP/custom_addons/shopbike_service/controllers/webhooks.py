@@ -110,6 +110,9 @@ class ShopbikeWebhookController(http.Controller):
             return request.make_json_response({'status': 'invalid_json', 'error': str(err)}, status=400)
 
         midtrans_order_id = payload.get('order_id', '')
+        if midtrans_order_id.startswith('payment_notif_test_'):
+            return request.make_json_response({'status': 'ok', 'test_notification': True}, status=200)
+
         status_code = str(payload.get('status_code', ''))
         gross_amount = str(payload.get('gross_amount', ''))
         signature_key = payload.get('signature_key', '')
