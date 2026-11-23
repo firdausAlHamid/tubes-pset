@@ -1,0 +1,12 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_vehicle_mechanic,shopbike.vehicle.mechanic,model_shopbike_vehicle,group_shopbike_mechanic,1,0,0,0
+access_vehicle_cashier,shopbike.vehicle.cashier,model_shopbike_vehicle,group_shopbike_cashier,1,1,1,0
+access_vehicle_manager,shopbike.vehicle.manager,model_shopbike_vehicle,group_shopbike_manager,1,1,1,1
+access_order_mechanic,shopbike.service.order.mechanic,model_shopbike_service_order,group_shopbike_mechanic,1,1,0,0
+access_order_cashier,shopbike.service.order.cashier,model_shopbike_service_order,group_shopbike_cashier,1,1,1,0
+access_order_manager,shopbike.service.order.manager,model_shopbike_service_order,group_shopbike_manager,1,1,1,1
+access_line_mechanic,shopbike.service.line.mechanic,model_shopbike_service_line,group_shopbike_mechanic,1,1,1,1
+access_line_cashier,shopbike.service.line.cashier,model_shopbike_service_line,group_shopbike_cashier,1,1,1,1
+access_line_manager,shopbike.service.line.manager,model_shopbike_service_line,group_shopbike_manager,1,1,1,1
+access_log_cashier,shopbike.integration.log.cashier,model_shopbike_integration_log,group_shopbike_cashier,1,0,0,0
+access_log_manager,shopbike.integration.log.manager,model_shopbike_integration_log,group_shopbike_manager,1,1,1,1

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <menuitem id="menu_shopbike_root"
+              name="Shop &amp; Bike"
+              sequence="10"/>
+
+    <menuitem id="menu_shopbike_orders"
+              name="Service Orders"
+              parent="menu_shopbike_root"
+              action="action_shopbike_service_order"
+              sequence="10"/>
+
+    <menuitem id="menu_shopbike_vehicles"
+              name="Kendaraan Pelanggan"
+              parent="menu_shopbike_root"
+              action="action_shopbike_vehicle"
+              sequence="20"/>
+
+    <menuitem id="menu_shopbike_logs"
+              name="Integration Logs"
+              parent="menu_shopbike_root"
+              action="action_shopbike_integration_log"
+              groups="group_shopbike_cashier,group_shopbike_manager"
+              sequence="30"/>
+</odoo>

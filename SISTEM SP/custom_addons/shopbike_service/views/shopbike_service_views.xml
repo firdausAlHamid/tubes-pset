@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_shopbike_service_order_list" model="ir.ui.view">
+        <field name="name">shopbike.service.order.list</field>
+        <field name="model">shopbike.service.order</field>
+        <field name="arch" type="xml">
+            <list string="Service Orders"
+                  decoration-success="state == 'paid'"
+                  decoration-warning="state == 'waiting_approval'"
+                  decoration-info="state == 'in_progress'"
+                  decoration-muted="state == 'cancelled'">
+                <field name="name"/>
+                <field name="date_order"/>
+                <field name="partner_id"/>
+                <field name="vehicle_id"/>
+                <field name="mechanic_id"/>
+                <field name="amount_total"/>
+                <field name="payment_status" widget="badge"
+                       decoration-success="payment_status == 'paid'"
+                       decoration-warning="payment_status == 'pending'"/>
+                <field name="state" widget="badge"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_shopbike_service_order_kanban" model="ir.ui.view">
+        <field name="name">shopbike.service.order.kanban</field>
+        <field name="model">shopbike.service.order</field>
+        <field name="arch" type="xml">
+            <kanban default_group_by="state" class="o_kanban_small_column">
+                <field name="name"/>
+                <field name="partner_id"/>
+                <field name="vehicle_id"/>
+                <field name="mechanic_id"/>
+                <field name="amount_total"/>
+                <field name="currency_id"/>
+                <field name="payment_status"/>
+                <templates>
+                    <t t-name="card">
+                        <div class="fw-bold fs-6">
+                            <field name="name"/>
+                        </div>
+                        <div class="text-muted">
+                            <field name="vehicle_id"/>
+                        </div>
+                        <div>Pelanggan: <field name="partner_id"/></div>
+                        <div>Mekanik: <field name="mechanic_id"/></div>
+                        <div class="d-flex justify-content-between align-items-center mt-2">
+                            <strong><field name="amount_total" widget="monetary"/></strong>
+                            <field name="payment_status" widget="badge"
+                                   decoration-success="payment_status == 'paid'"
+                                   decoration-warning="payment_status == 'pending'"/>
+                        </div>
+                    </t>
+                </templates>
+            </kanban>
+        </field>
+    </record>
+
+    <record id="view_shopbike_service_order_form" model="ir.ui.view">
+        <field name="name">shopbike.service.order.form</field>
+        <field name="model">shopbike.service.order</field>
+        <field name="arch" type="xml">
+            <form string="Service Order">
+                <header>
+                    <button name="action_confirm" string="Confirm Order" type="object"
+                            class="btn-primary" invisible="state != 'draft'"/>
+                    <button name="action_start_service" string="Mulai Servis" type="object"
+                            class="btn-primary" invisible="state != 'confirmed'"/>
+                    <button name="action_request_approval" string="Minta Persetujuan Tambahan (Telegram)" type="object"
+                            class="btn-warning" invisible="state != 'in_progress'"/>
+                    <button name="action_done" string="Selesai Servis &amp; Potong Stok" type="object"
+                            class="btn-success" invisible="state != 'in_progress'"/>
+                    <button name="action_generate_midtrans" string="Generate Midtrans Payment Link" type="object"
+                            class="btn-primary" invisible="state != 'done'"/>
+                    <button name="action_cancel" string="Cancel" type="object"
+                            invisible="state in ('done', 'paid', 'cancelled')"/>
+                    <field name="state" widget="statusbar"
+                           statusbar_visible="draft,confirmed,in_progress,waiting_approval,done,paid"/>
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1><field name="name"/></h1>
+                    </div>
+                    <group>
+                        <group string="Data Pelanggan &amp; Kendaraan">
+                            <field name="partner_id" readonly="state in ('done', 'paid', 'cancelled')"/>
+                            <field name="telegram_chat_id"/>
+                            <field name="vehicle_id" readonly="state in ('done', 'paid', 'cancelled')"/>
+                            <field name="odometer" readonly="state in ('done', 'paid', 'cancelled')"/>
+                        </group>
+                        <group string="Operasional &amp; Pembayaran">
+                            <field name="date_order"/>
+                            <field name="mechanic_id" readonly="state in ('done', 'paid', 'cancelled')"/>
+                            <field name="picking_id" readonly="1"/>
+                            <field name="invoice_id" readonly="1"/>
+                            <field name="payment_status" widget="badge"
+                                   decoration-success="payment_status == 'paid'"
+                                   decoration-warning="payment_status == 'pending'"/>
+                            <field name="midtrans_order_id" readonly="1"/>
+                            <field name="payment_url" widget="url" readonly="1"/>
+                        </group>
+                    </group>
+
+                    <notebook>
+                        <page string="Suku Cadang &amp; Jasa">
+                            <field name="line_ids" readonly="state in ('done', 'paid', 'cancelled')">
+                                <list editable="bottom"
+                                      decoration-warning="approval_status == 'pending'"
+                                      decoration-success="approval_status == 'approved'"
+                                      decoration-danger="approval_status == 'rejected'">
+                                    <field name="product_id"/>
+                                    <field name="description"/>
+                                    <field name="is_additional"/>
+                                    <field name="approval_status" widget="badge"/>
+                                    <field name="quantity"/>
+                                    <field name="price_unit"/>
+                                    <field name="price_subtotal"/>
+                                </list>
+                            </field>
+                            <group class="oe_subtotal_footer">
+                                <field name="currency_id" invisible="1"/>
+                                <field name="amount_pending_additional" widget="monetary"
+                                       invisible="amount_pending_additional == 0"/>
+                                <field name="amount_total" widget="monetary" class="oe_subtotal_footer_separator"/>
+                            </group>
+                        </page>
+                        <page string="Keluhan &amp; Diagnosa">
+                            <group>
+                                <field name="complaint" placeholder="Contoh: Ganti oli rutin &amp; cek rem belakang"/>
+                                <field name="diagnosis" placeholder="Contoh: Kampas rem tipis, aki lemah (11.2V), rekomendasi ganti aki"/>
+                            </group>
+                        </page>
+                        <page string="Log Integrasi API">
+                            <field name="log_ids" readonly="1">
+                                <list>
+                                    <field name="create_date"/>
+                                    <field name="service_type" widget="badge"/>
+                                    <field name="direction" widget="badge"/>
+                                    <field name="endpoint"/>
+                                    <field name="status_code"/>
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+                <chatter/>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_shopbike_service_order" model="ir.actions.act_window">
+        <field name="name">Service Orders</field>
+        <field name="res_model">shopbike.service.order</field>
+        <field name="view_mode">kanban,list,form</field>
+    </record>
+</odoo>

@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_shopbike_integration_log_list" model="ir.ui.view">
+        <field name="name">shopbike.integration.log.list</field>
+        <field name="model">shopbike.integration.log</field>
+        <field name="arch" type="xml">
+            <list string="Integration Logs" create="0"
+                  decoration-success="status_code in (200, 201)"
+                  decoration-danger="status_code not in (200, 201)">
+                <field name="create_date"/>
+                <field name="order_id"/>
+                <field name="service_type" widget="badge"/>
+                <field name="direction" widget="badge"/>
+                <field name="endpoint"/>
+                <field name="status_code"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="view_shopbike_integration_log_form" model="ir.ui.view">
+        <field name="name">shopbike.integration.log.form</field>
+        <field name="model">shopbike.integration.log</field>
+        <field name="arch" type="xml">
+            <form string="Detail Integration Log" create="0" edit="0">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="create_date"/>
+                            <field name="order_id"/>
+                            <field name="service_type"/>
+                        </group>
+                        <group>
+                            <field name="direction"/>
+                            <field name="endpoint"/>
+                            <field name="status_code"/>
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Request Payload (JSON)">
+                            <field name="request_payload" widget="text"/>
+                        </page>
+                        <page string="Response Payload (JSON)">
+                            <field name="response_payload" widget="text"/>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_shopbike_integration_log" model="ir.actions.act_window">
+        <field name="name">Integration Logs</field>
+        <field name="res_model">shopbike.integration.log</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>

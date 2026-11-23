@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_partner_form_shopbike" model="ir.ui.view">
+        <field name="name">res.partner.form.shopbike</field>
+        <field name="model">res.partner</field>
+        <field name="inherit_id" ref="base.view_partner_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//div[@name='button_box']" position="inside">
+                <button name="action_view_vehicles" type="object" class="oe_stat_button" icon="fa-motorcycle">
+                    <field name="vehicle_count" widget="statinfo" string="Kendaraan"/>
+                </button>
+            </xpath>
+            <xpath expr="//field[@name='phone']" position="after">
+                <field name="telegram_chat_id" placeholder="Contoh: 1098234122"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
