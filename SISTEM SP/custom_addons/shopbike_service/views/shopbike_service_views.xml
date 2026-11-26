@@ -67,7 +67,7 @@
                             class="btn-primary" invisible="state != 'draft'"/>
                     <button name="action_start_service" string="Mulai Servis" type="object"
                             class="btn-primary" invisible="state != 'confirmed'"/>
-                    <button name="action_request_approval" string="Minta Persetujuan Tambahan (Telegram)" type="object"
+                    <button name="action_request_approval" string="Minta Persetujuan Tambahan (WA / Telegram)" type="object"
                             class="btn-warning" invisible="state != 'in_progress'"/>
                     <button name="action_done" string="Selesai Servis &amp; Potong Stok" type="object"
                             class="btn-success" invisible="state != 'in_progress'"/>
@@ -85,6 +85,7 @@
                     <group>
                         <group string="Data Pelanggan &amp; Kendaraan">
                             <field name="partner_id" readonly="state in ('done', 'paid', 'cancelled')"/>
+                            <field name="whatsapp_number"/>
                             <field name="telegram_chat_id"/>
                             <field name="vehicle_id" readonly="state in ('done', 'paid', 'cancelled')"/>
                             <field name="odometer" readonly="state in ('done', 'paid', 'cancelled')"/>

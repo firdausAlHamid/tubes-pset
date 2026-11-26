@@ -10,6 +10,7 @@ class ShopbikeIntegrationLog(models.Model):
         'shopbike.service.order', string='Service Order', ondelete='set null',
     )
     service_type = fields.Selection([
+        ('whatsapp', 'WhatsApp (Fonnte)'),
         ('telegram', 'Telegram Bot API'),
         ('midtrans', 'Midtrans Payment Gateway'),
     ], string='Layanan Eksternal', required=True)

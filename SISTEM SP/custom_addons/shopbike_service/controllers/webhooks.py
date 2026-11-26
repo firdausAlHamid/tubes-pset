@@ -99,6 +99,155 @@ class ShopbikeWebhookController(http.Controller):
         return request.make_json_response({'status': 'ok'}, status=200)
 
     # ==========================================================
+    # 1B. INBOUND WEBHOOK: WHATSAPP FONNTE (REPLY YA / TIDAK)
+    # ==========================================================
+    @http.route('/api/shopbike/whatsapp/webhook', type='http', auth='public', methods=['POST', 'GET'], csrf=False)
+    def whatsapp_webhook(self, **kwargs):
+        if request.httprequest.method == 'GET':
+            return request.make_json_response({'status': 'ok', 'service': 'shopbike_whatsapp_webhook'}, status=200)
+
+        payload = dict(kwargs)
+        if request.httprequest.data:
+            try:
+                raw_body = request.httprequest.data.decode('utf-8')
+                if raw_body.strip().startswith('{'):
+                    payload.update(json.loads(raw_body))
+            except Exception:
+                pass
+
+        sender = str(payload.get('sender') or payload.get('pengirim') or '').strip()
+        msg_raw = str(payload.get('message') or payload.get('pesan') or '').strip()
+        if not sender or not msg_raw:
+            return request.make_json_response({'status': 'ignored'}, status=200)
+
+        parts = msg_raw.lower().split()
+        cmd = parts[0] if parts else ''
+        if cmd in ('ya', 'iya', 'yes', 'y', 'setuju', 'ok', 'oke', 'approve'):
+            action = 'approve'
+        elif cmd in ('tidak', 'tdk', 'no', 'n', 'tolak', 'reject', 'gak', 'nggak'):
+            action = 'reject'
+        else:
+            return request.make_json_response({'status': 'ignored', 'reason': 'unrecognized_command'}, status=200)
+
+        Order = request.env['shopbike.service.order'].sudo()
+        norm_sender = Order._normalize_wa_number(sender)
+        order = Order.browse()
+
+        if len(parts) > 1:
+            order_ref = parts[1].strip()
+            order = Order.search([('name', '=ilike', order_ref), ('state', '=', 'waiting_approval')], limit=1)
+
+        if not order and norm_sender:
+            waiting_orders = Order.search([('state', '=', 'waiting_approval')], order='id desc', limit=20)
+            for candidate in waiting_orders:
+                cand_wa = Order._normalize_wa_number(candidate._get_customer_whatsapp())
+                if cand_wa and (cand_wa == norm_sender or cand_wa[-9:] == norm_sender[-9:]):
+                    order = candidate
+                    break
+
+        if not order:
+            return request.make_json_response({'status': 'order_not_found'}, status=200)
+
+        pending_lines = order.line_ids.filtered(lambda l: l.approval_status == 'pending')
+        if action == 'approve':
+            pending_lines.write({'approval_status': 'approved'})
+            order.write({'state': 'in_progress'})
+            reply_text = (
+                f"*✅ Persetujuan Diterima!*\n"
+                f"Order `{order.name}`: Item tambahan *DISETUJUI*.\n"
+                f"Total tagihan terbaru: *Rp {int(order.amount_total):,}*.\n"
+                f"Mekanik segera melanjutkan pengerjaan."
+            )
+            order.message_post(body="Pelanggan MENYETUJUI biaya tambahan melalui WhatsApp (Fonnte).")
+        else:
+            pending_lines.write({'approval_status': 'rejected'})
+            order.write({'state': 'in_progress'})
+            reply_text = (
+                f"*❌ Konfirmasi Diterima!*\n"
+                f"Order `{order.name}`: Item tambahan *DITOLAK*.\n"
+                f"Mekanik hanya melanjutkan servis awal (Total: *Rp {int(order.amount_total):,}*)."
+            )
+            order.message_post(body="Pelanggan MENOLAK biaya tambahan melalui WhatsApp (Fonnte).")
+
+        order._create_integration_log(
+            'whatsapp', 'inbound', '/api/shopbike/whatsapp/webhook',
+            200, payload, {'action_processed': action, 'order': order.name, 'sender': norm_sender},
+        )
+        order._send_whatsapp_message(norm_sender, reply_text)
+        return request.make_json_response({'status': 'ok', 'action': action, 'order': order.name}, status=200)
+
+    # ==========================================================
+    # 1C. CLICKABLE LINK CONFIRMATION FROM WHATSAPP (GET)
+    # ==========================================================
+    @http.route('/api/shopbike/whatsapp/confirm', type='http', auth='public', methods=['GET'], csrf=False)
+    def whatsapp_confirm_link(self, order_id=None, action=None, sig=None, **kwargs):
+        try:
+            oid = int(order_id)
+        except (TypeError, ValueError):
+            return request.make_response("<h3>Link tidak valid.</h3>", status=400, headers=[('Content-Type', 'text/html; charset=utf-8')])
+
+        if action not in ('approve', 'reject') or not sig:
+            return request.make_response("<h3>Parameter tidak valid.</h3>", status=400, headers=[('Content-Type', 'text/html; charset=utf-8')])
+
+        order = request.env['shopbike.service.order'].sudo().browse(oid)
+        if not order.exists():
+            return request.make_response("<h3>Order tidak ditemukan.</h3>", status=404, headers=[('Content-Type', 'text/html; charset=utf-8')])
+
+        expected_sig = order._sign_wa_action(action)
+        if not hmac.compare_digest(expected_sig, str(sig)):
+            return request.make_response("<h3>Signature link tidak valid.</h3>", status=403, headers=[('Content-Type', 'text/html; charset=utf-8')])
+
+        if order.state != 'waiting_approval':
+            html = (
+                f"<html><body style='font-family:sans-serif;padding:24px;max-width:480px;margin:auto'>"
+                f"<h2>ℹ️ Sudah Dikonfirmasi</h2>"
+                f"<p>Order <b>{order.name}</b> sudah diproses sebelumnya (status: <b>{order.state}</b>).</p>"
+                f"</body></html>"
+            )
+            return request.make_response(html, status=200, headers=[('Content-Type', 'text/html; charset=utf-8')])
+
+        pending_lines = order.line_ids.filtered(lambda l: l.approval_status == 'pending')
+        if action == 'approve':
+            pending_lines.write({'approval_status': 'approved'})
+            order.write({'state': 'in_progress'})
+            title = "✅ Persetujuan Diterima!"
+            desc = f"Item tambahan untuk order <b>{order.name}</b> telah <b>DISETUJUI</b>. Total terbaru: <b>Rp {int(order.amount_total):,}</b>."
+            wa_reply = (
+                f"*✅ Persetujuan Diterima!*\n"
+                f"Order `{order.name}`: Item tambahan *DISETUJUI*.\n"
+                f"Total tagihan terbaru: *Rp {int(order.amount_total):,}*.\n"
+                f"Mekanik segera melanjutkan pengerjaan."
+            )
+            order.message_post(body="Pelanggan MENYETUJUI biaya tambahan melalui klik link WhatsApp.")
+        else:
+            pending_lines.write({'approval_status': 'rejected'})
+            order.write({'state': 'in_progress'})
+            title = "❌ Konfirmasi Diterima!"
+            desc = f"Item tambahan untuk order <b>{order.name}</b> telah <b>DITOLAK</b>. Lanjut servis awal (Total: <b>Rp {int(order.amount_total):,}</b>)."
+            wa_reply = (
+                f"*❌ Konfirmasi Diterima!*\n"
+                f"Order `{order.name}`: Item tambahan *DITOLAK*.\n"
+                f"Mekanik hanya melanjutkan servis awal (Total: *Rp {int(order.amount_total):,}*)."
+            )
+            order.message_post(body="Pelanggan MENOLAK biaya tambahan melalui klik link WhatsApp.")
+
+        order._create_integration_log(
+            'whatsapp', 'inbound', '/api/shopbike/whatsapp/confirm',
+            200, {'order_id': oid, 'action': action}, {'action_processed': action, 'order': order.name},
+        )
+        cust_wa = order._get_customer_whatsapp()
+        if cust_wa:
+            order._send_whatsapp_message(cust_wa, wa_reply)
+
+        html = (
+            f"<html><body style='font-family:sans-serif;padding:24px;max-width:480px;margin:auto'>"
+            f"<h2>{title}</h2><p>{desc}</p>"
+            f"<p style='color:#666'>Anda boleh menutup halaman ini dan kembali ke WhatsApp.</p>"
+            f"</body></html>"
+        )
+        return request.make_response(html, status=200, headers=[('Content-Type', 'text/html; charset=utf-8')])
+
+    # ==========================================================
     # 2. INBOUND WEBHOOK: MIDTRANS PAYMENT NOTIFICATION (SHA-512)
     # ==========================================================
     @http.route('/api/shopbike/midtrans/callback', type='http', auth='public', methods=['POST'], csrf=False)
@@ -182,15 +331,21 @@ class ShopbikeWebhookController(http.Controller):
                 body=f"Pembayaran LUNAS terverifikasi otomatis via Midtrans Webhook (Order ID: {midtrans_order_id})."
             )
 
-            if order.telegram_chat_id:
-                receipt_msg = (
-                    f"<b>🎉 Pembayaran Berhasil (LUNAS)!</b>\n"
-                    f"Terima kasih <b>{order.partner_id.name}</b>.\n"
-                    f"Pembayaran untuk Order <code>{order.name}</code> sebesar "
-                    f"<b>Rp {int(order.amount_total):,}</b> telah kami terima.\n"
-                    f"Silakan ambil kunci motor <b>{order.vehicle_id.display_name}</b> Anda di kasir Shop & Bike!"
-                )
-                order._send_telegram_message(order.telegram_chat_id, receipt_msg)
+            wa_receipt = (
+                f"*🎉 Pembayaran Berhasil (LUNAS)!*\n"
+                f"Terima kasih *{order.partner_id.name}*.\n"
+                f"Pembayaran untuk Order `{order.name}` sebesar "
+                f"*Rp {int(order.amount_total):,}* telah kami terima.\n"
+                f"Silakan ambil kunci motor *{order.vehicle_id.display_name}* Anda di kasir Shop & Bike!"
+            )
+            tg_receipt = (
+                f"<b>🎉 Pembayaran Berhasil (LUNAS)!</b>\n"
+                f"Terima kasih <b>{order.partner_id.name}</b>.\n"
+                f"Pembayaran untuk Order <code>{order.name}</code> sebesar "
+                f"<b>Rp {int(order.amount_total):,}</b> telah kami terima.\n"
+                f"Silakan ambil kunci motor <b>{order.vehicle_id.display_name}</b> Anda di kasir Shop & Bike!"
+            )
+            order._notify_customer(wa_receipt, tg_receipt)
 
         elif tx_status in ('cancel', 'deny', 'expire'):
             order.write({'payment_status': 'failed'})

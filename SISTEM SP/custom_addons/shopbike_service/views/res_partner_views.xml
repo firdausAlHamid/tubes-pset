@@ -11,6 +11,7 @@
                 </button>
             </xpath>
             <xpath expr="//field[@name='phone']" position="after">
+                <field name="whatsapp_number" placeholder="Contoh: 08123456789"/>
                 <field name="telegram_chat_id" placeholder="Contoh: 1098234122"/>
             </xpath>
         </field>

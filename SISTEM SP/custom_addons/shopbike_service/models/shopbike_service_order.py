@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import hmac
 import json
 import time
 import requests
@@ -22,6 +24,11 @@ class ShopbikeServiceOrder(models.Model):
     )
     partner_id = fields.Many2one(
         'res.partner', string='Pelanggan', required=True, tracking=True,
+    )
+    whatsapp_number = fields.Char(
+        related='partner_id.whatsapp_number',
+        string='Nomor WhatsApp',
+        readonly=False,
     )
     telegram_chat_id = fields.Char(
         related='partner_id.telegram_chat_id',
@@ -125,7 +132,78 @@ class ShopbikeServiceOrder(models.Model):
                 vals['name'] = self.env['ir.sequence'].next_by_code('shopbike.service.order') or 'New'
         return super().create(vals_list)
 
-    # ---------------- HELPER LOG & TELEGRAM ----------------
+    # ---------------- HELPER LOG, WHATSAPP (FONNTE) & TELEGRAM ----------------
+
+    @staticmethod
+    def _normalize_wa_number(phone):
+        if not phone:
+            return ''
+        raw = str(phone).split('@', 1)[0].strip()
+        digits = ''.join(ch for ch in raw if ch.isdigit())
+        if digits.startswith('0'):
+            digits = '62' + digits[1:]
+        return digits
+
+    def _get_customer_whatsapp(self):
+        self.ensure_one()
+        return self.whatsapp_number or self.partner_id.phone or ''
+
+    def _get_public_base_url(self):
+        try:
+            tunnels = requests.get('http://127.0.0.1:4040/api/tunnels', timeout=1).json().get('tunnels', [])
+            if tunnels and tunnels[0].get('public_url'):
+                return tunnels[0]['public_url'].rstrip('/')
+        except Exception:
+            pass
+        return (self.env['ir.config_parameter'].sudo().get_param('web.base.url') or 'http://127.0.0.1:8070').rstrip('/')
+
+    def _sign_wa_action(self, action):
+        self.ensure_one()
+        secret = self.env['ir.config_parameter'].sudo().get_param('database.secret') or 'shopbike-secret'
+        msg = f"{self.id}:{action}".encode('utf-8')
+        return hmac.new(secret.encode('utf-8'), msg, hashlib.sha256).hexdigest()[:24]
+
+    def _send_whatsapp_message(self, phone, message):
+        token = self.env['ir.config_parameter'].sudo().get_param('shopbike.fonnte_token')
+        target = self._normalize_wa_number(phone)
+        if not token or not target:
+            return False
+
+        endpoint = "https://api.fonnte.com/send"
+        payload = {'target': target, 'message': message}
+        try:
+            resp = requests.post(
+                endpoint,
+                headers={'Authorization': token.strip()},
+                data=payload,
+                timeout=15,
+            )
+            try:
+                res_json = resp.json()
+            except Exception:
+                res_json = {'raw': resp.text}
+            self._create_integration_log(
+                'whatsapp', 'outbound', endpoint, resp.status_code, payload, res_json,
+            )
+            return resp.status_code == 200 and bool(res_json.get('status'))
+        except requests.exceptions.RequestException as err:
+            self._create_integration_log(
+                'whatsapp', 'outbound', endpoint, 0, payload, {'error': str(err)},
+            )
+            return False
+
+    def _notify_customer(self, wa_text, tg_text, tg_reply_markup=None):
+        """Kirim notifikasi ke WhatsApp (Fonnte) jika aktif, atau fallback ke Telegram."""
+        self.ensure_one()
+        fonnte_token = self.env['ir.config_parameter'].sudo().get_param('shopbike.fonnte_token')
+        wa_target = self._get_customer_whatsapp()
+        if fonnte_token and wa_target:
+            return 'whatsapp', self._send_whatsapp_message(wa_target, wa_text)
+        if self.telegram_chat_id:
+            return 'telegram', self._send_telegram_message(
+                self.telegram_chat_id, tg_text, reply_markup=tg_reply_markup,
+            )
+        return None, False
 
     def _create_integration_log(self, service_type, direction, endpoint, status_code, req_data, res_data):
         self.env['shopbike.integration.log'].sudo().create({
@@ -183,7 +261,7 @@ class ShopbikeServiceOrder(models.Model):
             order.state = 'in_progress'
 
     def action_request_approval(self):
-        """Kirim rincian temuan tambahan ke Telegram pelanggan dengan Inline Button Ya/Tidak."""
+        """Kirim rincian temuan tambahan ke WhatsApp (Fonnte) / Telegram pelanggan."""
         for order in self:
             pending_lines = order.line_ids.filtered(lambda l: l.approval_status == 'pending')
             if not pending_lines:
@@ -191,8 +269,11 @@ class ShopbikeServiceOrder(models.Model):
                     "Tidak ada item tambahan berstatus 'Menunggu Persetujuan'. "
                     "Centang kolom 'Temuan Tambahan?' pada baris suku cadang/jasa baru terlebih dahulu."
                 )
-            if not order.telegram_chat_id:
-                raise UserError("Telegram Chat ID pelanggan belum diisi!")
+
+            fonnte_token = order.env['ir.config_parameter'].sudo().get_param('shopbike.fonnte_token')
+            has_wa = bool(fonnte_token and order._get_customer_whatsapp())
+            if not has_wa and not order.telegram_chat_id:
+                raise UserError("Nomor WhatsApp atau Telegram Chat ID pelanggan belum diisi!")
 
             detail_lines = "\n".join([
                 f"• {l.product_id.display_name} ({int(l.quantity)}x): Rp {int(l.price_subtotal):,}"
@@ -201,7 +282,24 @@ class ShopbikeServiceOrder(models.Model):
             total_tambahan = int(sum(pending_lines.mapped('price_subtotal')))
             total_jika_setuju = int(order.amount_total + total_tambahan)
 
-            msg = (
+            base_url = order._get_public_base_url()
+            approve_url = f"{base_url}/api/shopbike/whatsapp/confirm?order_id={order.id}&action=approve&sig={order._sign_wa_action('approve')}"
+            reject_url = f"{base_url}/api/shopbike/whatsapp/confirm?order_id={order.id}&action=reject&sig={order._sign_wa_action('reject')}"
+
+            wa_msg = (
+                f"*🔧 Shop & Bike — Konfirmasi Biaya Tambahan*\n"
+                f"Halo *{order.partner_id.name}*,\n"
+                f"Saat inspeksi motor *{order.vehicle_id.display_name}* (`{order.name}`), "
+                f"mekanik menemukan komponen berikut perlu diganti:\n\n"
+                f"*Rekomendasi Tambahan:*\n{detail_lines}\n\n"
+                f"Servis Awal: Rp {int(order.amount_total):,}\n"
+                f"Biaya Tambahan: *+Rp {total_tambahan:,}*\n"
+                f"Estimasi Total Jika Setuju: *Rp {total_jika_setuju:,}*\n\n"
+                f"✅ *Klik untuk SETUJU:*\n{approve_url}\n\n"
+                f"❌ *Klik untuk TOLAK:*\n{reject_url}\n\n"
+                f"_(Atau balas *YA* / *TIDAK* pada chat ini)_"
+            )
+            tg_msg = (
                 f"<b>🔧 Shop & Bike — Konfirmasi Biaya Tambahan</b>\n"
                 f"Halo <b>{order.partner_id.name}</b>,\n"
                 f"Saat inspeksi motor <b>{order.vehicle_id.display_name}</b> (<code>{order.name}</code>), "
@@ -218,11 +316,12 @@ class ShopbikeServiceOrder(models.Model):
                     [{'text': "❌ Tidak, Lanjut Servis Biasa", 'callback_data': f"reject:{order.id}"}],
                 ]
             }
-            sent = order._send_telegram_message(order.telegram_chat_id, msg, reply_markup=reply_markup)
+            channel, sent = order._notify_customer(wa_msg, tg_msg, tg_reply_markup=reply_markup)
             if not sent:
-                raise UserError("Gagal mengirim pesan ke Telegram. Cek Token Bot / Chat ID di Integration Logs.")
+                raise UserError("Gagal mengirim pesan persetujuan. Cek Token Fonnte / Telegram di Integration Logs.")
             order.state = 'waiting_approval'
-            order.message_post(body="Permintaan persetujuan biaya tambahan telah dikirim ke Telegram pelanggan.")
+            label = "WhatsApp" if channel == 'whatsapp' else "Telegram"
+            order.message_post(body=f"Permintaan persetujuan biaya tambahan telah dikirim ke {label} pelanggan.")
 
     def _deduct_stock_and_check_alert(self):
         """Buat & validasi stock.picking untuk produk storable yang disetujui, lalu cek Low Stock Alert."""
@@ -279,24 +378,37 @@ class ShopbikeServiceOrder(models.Model):
         picking.with_context(skip_sms=True, skip_backorder=True).button_validate()
         self.picking_id = picking.id
 
-        # Cek Low Stock Alert untuk Grup Telegram Kepala Toko
+        # Cek Low Stock Alert untuk Kepala Toko (WhatsApp Fonnte / Telegram)
+        fonnte_token = self.env['ir.config_parameter'].sudo().get_param('shopbike.fonnte_token')
+        wa_manager = self.env['ir.config_parameter'].sudo().get_param('shopbike.whatsapp_manager_phone')
         manager_chat_id = self.env['ir.config_parameter'].sudo().get_param('shopbike.telegram_manager_chat_id')
-        if manager_chat_id:
+        if (fonnte_token and wa_manager) or manager_chat_id:
             for line in storable_lines:
                 product = line.product_id.sudo()
                 product.invalidate_recordset(['qty_available'])
                 qty_now = product.qty_available
                 threshold = product.product_tmpl_id.min_stock_threshold
                 if qty_now <= threshold:
-                    alert_msg = (
-                        f"<b>⚠️ [PERINGATAN STOK MENIPIS] — Shop & Bike</b>\n"
-                        f"Produk: <b>{product.display_name}</b>\n"
-                        f"Sisa Stok Saat Ini: <b>{qty_now:g} {product.uom_id.name}</b>\n"
-                        f"Batas Minimum: {threshold:g} {product.uom_id.name}\n"
-                        f"Pemicu Order: <code>{self.name}</code>\n"
-                        f"Harap segera lakukan restock ke supplier."
-                    )
-                    self._send_telegram_message(manager_chat_id, alert_msg)
+                    if fonnte_token and wa_manager:
+                        wa_alert = (
+                            f"*⚠️ [PERINGATAN STOK MENIPIS] — Shop & Bike*\n"
+                            f"Produk: *{product.display_name}*\n"
+                            f"Sisa Stok Saat Ini: *{qty_now:g} {product.uom_id.name}*\n"
+                            f"Batas Minimum: {threshold:g} {product.uom_id.name}\n"
+                            f"Pemicu Order: `{self.name}`\n"
+                            f"Harap segera lakukan restock ke supplier."
+                        )
+                        self._send_whatsapp_message(wa_manager, wa_alert)
+                    elif manager_chat_id:
+                        alert_msg = (
+                            f"<b>⚠️ [PERINGATAN STOK MENIPIS] — Shop & Bike</b>\n"
+                            f"Produk: <b>{product.display_name}</b>\n"
+                            f"Sisa Stok Saat Ini: <b>{qty_now:g} {product.uom_id.name}</b>\n"
+                            f"Batas Minimum: {threshold:g} {product.uom_id.name}\n"
+                            f"Pemicu Order: <code>{self.name}</code>\n"
+                            f"Harap segera lakukan restock ke supplier."
+                        )
+                        self._send_telegram_message(manager_chat_id, alert_msg)
 
     def action_done(self):
         for order in self:
@@ -314,23 +426,31 @@ class ShopbikeServiceOrder(models.Model):
 
             order.state = 'done'
 
-            # Kirim Notifikasi Telegram ke Pelanggan bahwa motor selesai diservis
-            if order.telegram_chat_id:
-                approved_lines = order.line_ids.filtered(lambda l: l.approval_status in ('included', 'approved'))
-                items_text = "\n".join([
-                    f"• {l.product_id.display_name} ({int(l.quantity)}x): Rp {int(l.price_subtotal):,}"
-                    for l in approved_lines
-                ])
-                msg = (
-                    f"<b>✅ Shop & Bike — Motor Selesai Diservis!</b>\n"
-                    f"Halo <b>{order.partner_id.name}</b>,\n"
-                    f"Motor <b>{order.vehicle_id.display_name}</b> Anda telah selesai dikerjakan.\n\n"
-                    f"No. Order: <code>{order.name}</code>\n"
-                    f"<b>Rincian Pekerjaan:</b>\n{items_text}\n\n"
-                    f"<b>Total Tagihan: Rp {int(order.amount_total):,}</b>\n"
-                    f"Silakan menuju kasir atau tunggu tautan pembayaran QRIS/VA dari kami."
-                )
-                order._send_telegram_message(order.telegram_chat_id, msg)
+            # Kirim Notifikasi ke Pelanggan bahwa motor selesai diservis
+            approved_lines = order.line_ids.filtered(lambda l: l.approval_status in ('included', 'approved'))
+            items_text = "\n".join([
+                f"• {l.product_id.display_name} ({int(l.quantity)}x): Rp {int(l.price_subtotal):,}"
+                for l in approved_lines
+            ])
+            wa_msg = (
+                f"*✅ Shop & Bike — Motor Selesai Diservis!*\n"
+                f"Halo *{order.partner_id.name}*,\n"
+                f"Motor *{order.vehicle_id.display_name}* Anda telah selesai dikerjakan.\n\n"
+                f"No. Order: `{order.name}`\n"
+                f"*Rincian Pekerjaan:*\n{items_text}\n\n"
+                f"*Total Tagihan: Rp {int(order.amount_total):,}*\n"
+                f"Silakan menuju kasir atau tunggu tautan pembayaran QRIS/VA dari kami."
+            )
+            tg_msg = (
+                f"<b>✅ Shop & Bike — Motor Selesai Diservis!</b>\n"
+                f"Halo <b>{order.partner_id.name}</b>,\n"
+                f"Motor <b>{order.vehicle_id.display_name}</b> Anda telah selesai dikerjakan.\n\n"
+                f"No. Order: <code>{order.name}</code>\n"
+                f"<b>Rincian Pekerjaan:</b>\n{items_text}\n\n"
+                f"<b>Total Tagihan: Rp {int(order.amount_total):,}</b>\n"
+                f"Silakan menuju kasir atau tunggu tautan pembayaran QRIS/VA dari kami."
+            )
+            order._notify_customer(wa_msg, tg_msg)
 
     def action_generate_midtrans(self):
         """Buat Customer Invoice (account.move), tembak Midtrans Snap API, dan kirim link ke Telegram."""
@@ -387,6 +507,12 @@ class ShopbikeServiceOrder(models.Model):
             'Content-Type': 'application/json',
             'Authorization': f'Basic {auth_str}',
         }
+        try:
+            tunnels = requests.get('http://127.0.0.1:4040/api/tunnels', timeout=1).json().get('tunnels', [])
+            if tunnels and tunnels[0].get('public_url'):
+                headers['X-Override-Notification'] = f"{tunnels[0]['public_url']}/api/shopbike/midtrans/callback"
+        except Exception:
+            pass
         payload = {
             'transaction_details': {
                 'order_id': midtrans_order_id,
@@ -425,16 +551,23 @@ class ShopbikeServiceOrder(models.Model):
         })
         self.message_post(body=f"Payment Link Midtrans dibuat: {redirect_url}")
 
-        # 3. Kirim Link Pembayaran ke Telegram Pelanggan
-        if self.telegram_chat_id and redirect_url:
-            pay_msg = (
+        # 3. Kirim Link Pembayaran ke WhatsApp / Telegram Pelanggan
+        if redirect_url:
+            wa_pay_msg = (
+                f"*💳 Shop & Bike — Tautan Pembayaran Digital*\n"
+                f"No. Order: `{self.name}`\n"
+                f"Total Tagihan: *Rp {gross_amount:,}*\n\n"
+                f"Silakan selesaikan pembayaran (QRIS / Virtual Account) melalui link berikut:\n"
+                f"{redirect_url}"
+            )
+            tg_pay_msg = (
                 f"<b>💳 Shop & Bike — Tautan Pembayaran Digital</b>\n"
                 f"No. Order: <code>{self.name}</code>\n"
                 f"Total Tagihan: <b>Rp {gross_amount:,}</b>\n\n"
                 f"Silakan selesaikan pembayaran (QRIS / Virtual Account) melalui link berikut:\n"
                 f"{redirect_url}"
             )
-            self._send_telegram_message(self.telegram_chat_id, pay_msg)
+            self._notify_customer(wa_pay_msg, tg_pay_msg)
 
     def action_cancel(self):
         for order in self:

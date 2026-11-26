@@ -4,6 +4,10 @@ from odoo import fields, models
 class ResPartner(models.Model):
     _inherit = 'res.partner'
 
+    whatsapp_number = fields.Char(
+        string='Nomor WhatsApp',
+        help='Nomor WhatsApp pelanggan (contoh: 08123456789 / 628123456789) untuk notifikasi & persetujuan via Fonnte.',
+    )
     telegram_chat_id = fields.Char(
         string='Telegram Chat ID',
         help='Chat ID Telegram pelanggan untuk menerima notifikasi servis & persetujuan biaya tambahan.',
